@@ -479,44 +479,6 @@ namespace
         }
     };
 
-    class GenericObjectTypeSelection final : public ObjectTypeSelection
-    {
-    public:
-        GenericObjectTypeSelection( const std::vector<Maps::ObjectInfo> & objectInfo, const fheroes2::Size & size, std::string title )
-            : ObjectTypeSelection( objectInfo, size, std::move( title ), 6 * 32 / 2, 6 * 32 + 10, 3 * 32 )
-        {
-            // Do nothing.
-        }
-
-    private:
-        void showPopupWindow( const Maps::ObjectInfo & info ) override
-        {
-            fheroes2::showStandardTextMessage( getObjectName( info ), "", Dialog::ZERO );
-        }
-
-        std::string getObjectName( const Maps::ObjectInfo & info ) override
-        {
-            if ( info.objectType == MP2::OBJ_NONE ) {
-                return _( "Terrain object" );
-            }
-
-            // Barriers and Traveller's Tents use the same name while we need to show their color as well.
-            if ( info.objectType == MP2::OBJ_BARRIER ) {
-                std::string str = _( "%{color} Barrier" );
-                StringReplace( str, "%{color}", fheroes2::getBarrierColorName( static_cast<int32_t>( info.metadata[0] ) ) );
-                return str;
-            }
-
-            if ( info.objectType == MP2::OBJ_TRAVELLER_TENT ) {
-                std::string str = _( "%{color} Tent" );
-                StringReplace( str, "%{color}", fheroes2::getTentColorName( static_cast<int32_t>( info.metadata[0] ) ) );
-                return str;
-            }
-
-            return MP2::StringObject( info.objectType );
-        }
-    };
-
     class PowerUpObjectTypeSelection final : public ObjectTypeSelection
     {
     public:
@@ -812,6 +774,234 @@ namespace Dialog
         assert( _window );
         return _window->totalArea();
     }
+
+    class ItemsGridSelectionWindow : protected ItemSelectionWindow
+    {
+    public:
+        ItemsGridSelectionWindow( const fheroes2::Size & dialogSize, std::string title, std::string description = {} )
+            : ItemSelectionWindow( dialogSize, std::move( title ), std::move( description ) )
+        {
+            // Do nothing.
+        }
+
+        using ItemSelectionWindow::selectItemsEventProcessing;
+
+        void setObjects( const size_t objectCount, int itemWidth )
+        {
+            assert( itemWidth > 0 );
+
+            _columns = std::max( rtAreaItems.width / itemWidth, 1 );
+            _selectedObject = -1;
+
+            _objectCount = objectCount;
+            _rows.resize( ( _objectCount + _columns - 1 ) / _columns );
+            std::iota( _rows.begin(), _rows.end(), 0 );
+            SetListContent( _rows );
+        }
+
+        int32_t getSelectedObject() const
+        {
+            return _selectedObject;
+        }
+
+        void setSelection( int object )
+        {
+            _selectedObject = object;
+
+            if ( _selectedObject == -1 ) {
+                return;
+            }
+
+            auto row = object / _columns;
+
+            assert( row >= 0 || row < _rows.size() );
+
+            SetCurrent( row );
+        }
+
+    protected:
+        using ItemSelectionWindow::ActionListDoubleClick;
+
+        void ActionListDoubleClick( int & row, const fheroes2::Point & mousePos, int32_t itemOffsetX, int32_t itemOffsetY ) override
+        {
+            auto clickedItem = GetRowItem( row, mousePos, itemOffsetX, itemOffsetY );
+
+            if ( clickedItem == _selectedObject && clickedItem != -1 )
+                ActionListDoubleClick( row );
+            else
+                _selectedObject = clickedItem;
+        }
+
+        virtual void ActionListSingleClick( int & row, const fheroes2::Point & mousePos, int32_t itemOffsetX, int32_t itemOffsetY ) override
+        {
+            _selectedObject = GetRowItem( row, mousePos, itemOffsetX, itemOffsetY );
+        }
+
+        void ActionListPressRight( int & row, const fheroes2::Point & mousePos, int32_t itemOffsetX, int32_t itemOffsetY )
+        {
+            auto rowItem = GetRowItem( row, mousePos, itemOffsetX, itemOffsetY );
+            if ( rowItem != -1 ) {
+                ActionListPressRightInRow( rowItem );
+            }
+        }
+
+        virtual void ActionListPressRightInRow( int objectId ) = 0;
+
+        void RedrawItem( const int & row, int32_t ox, int32_t oy, bool /* current */ ) override
+        {
+            Row( row, *this ).RedrawItem( ox, oy );
+        }
+
+        virtual void RedrawItem( int objectId, int32_t posX, int32_t posY, int w, int h, bool isSelected ) = 0;
+
+        // Draw sprite with text centered under the image.
+        void renderItem( const fheroes2::Sprite & itemSprite, std::string itemText, const fheroes2::Point & destination, const int32_t w, const int32_t h,
+                         const bool current ) const
+        {
+            fheroes2::Display & display = fheroes2::Display::instance();
+
+            const int x = destination.x + ( ( w - itemSprite.width() ) / 2 );
+            const int y = destination.y + ( ( h - itemSprite.height() ) / 2 );
+            fheroes2::Blit( itemSprite, display, x, y );
+
+            fheroes2::Text text( std::move( itemText ), current ? fheroes2::FontType::normalYellow() : fheroes2::FontType::normalWhite() );
+            text.fitToOneRow( w );
+            text.draw( destination.x + ( ( w - text.width() ) / 2 ), destination.y + h - text.height(), display );
+        }
+
+        int GetRowItem( int row, const fheroes2::Point & mousePos, int32_t itemOffsetX, int32_t itemOffsetY )
+        {
+            return Row( row, *this ).GetRowItem( mousePos, itemOffsetX, itemOffsetY );
+        }
+
+    private:
+        struct Row
+        {
+            ItemsGridSelectionWindow & window;
+            int begin;
+            int end;
+            int itemWidth;
+            int itemHeight;
+
+            Row( int row, ItemsGridSelectionWindow & w )
+                : window( w )
+                , begin( row * w._columns )
+                , end( std::min( begin + w._columns, static_cast<int>( w._objectCount ) ) )
+                , itemWidth( static_cast<int>( ( w.rtAreaItems.width - 50 ) / w._columns ) )
+                , itemHeight( w.rtAreaItems.height / w.VisibleItemCount() )
+            {}
+
+            void RedrawItem( int32_t ox, int32_t oy )
+            {
+                for ( int i = begin; i < end; ++i ) {
+                    const int x = ox + ( i - begin ) * itemWidth;
+                    window.RedrawItem( i, x, oy, itemWidth, itemHeight, i == window._selectedObject );
+                }
+            }
+
+            int GetRowItem( const fheroes2::Point & mousePos, int32_t itemOffsetX, int32_t itemOffsetY )
+            {
+                const int column = ( mousePos.x - itemOffsetX ) / itemWidth;
+                const int object = begin + column;
+                const bool isMatchHeight = mousePos.y >= itemOffsetY && mousePos.y < itemOffsetY + itemHeight;
+                if ( column >= 0 && object < end && isMatchHeight )
+                    return object;
+                return -1;
+            }
+        };
+
+        size_t _objectCount{ 0 };
+        std::vector<int> _rows;
+        int _columns{ 0 };
+        int _selectedObject{ -1 };
+    };
+}
+
+class GenericObjectTypeGridSelection : public Dialog::ItemsGridSelectionWindow
+{
+public:
+    static fheroes2::Size defaultSize()
+    {
+        const auto & display = fheroes2::Display::instance();
+        const auto w = display.width() - 180;
+        const auto h = display.height() - 180;
+        return { w, h };
+    }
+
+    GenericObjectTypeGridSelection( const std::vector<Maps::ObjectInfo> & objectInfo, std::string title, const fheroes2::Size & size = defaultSize() )
+        : ItemsGridSelectionWindow( size, std::move( title ) )
+        , _objectInfo( objectInfo )
+    {
+        SetAreaMaxItems( rtAreaItems.height / _offsetY );
+    }
+
+    void RedrawItem( int objectId, int32_t posX, int32_t posY, int w, int h, bool isSelected ) override
+    {
+        // If this assertion blows up then you are setting different number of items.
+        assert( objectId >= 0 && objectId < static_cast<int>( _objectInfo.size() ) );
+
+        const fheroes2::Sprite & image = fheroes2::generateMapObjectImage( _objectInfo[objectId] );
+        const int32_t imageHeight = static_cast<int>( image.height() );
+        const int32_t imageWidth = static_cast<int>( image.width() );
+
+        int imageMaxHeight = h - 32; // place for text
+
+        if ( imageWidth > w || imageHeight > imageMaxHeight ) {
+            const double scale = std::min( 1.0 * w / imageWidth, 1.0 * imageMaxHeight / imageHeight );
+            fheroes2::Image resized( static_cast<int32_t>( imageWidth * scale ), static_cast<int32_t>( imageHeight * scale ) );
+            fheroes2::Resize( image, resized );
+            renderItem( resized, getObjectName( _objectInfo[objectId] ), { posX, posY }, w, h, isSelected );
+        }
+        else {
+            renderItem( image, getObjectName( _objectInfo[objectId] ), { posX, posY }, w, h, isSelected );
+        }
+    }
+
+    void ActionListPressRightInRow( int objectId ) override
+    {
+        // If this assertion blows up then you are setting different number of items.
+        assert( objectId >= 0 && objectId < static_cast<int>( _objectInfo.size() ) );
+
+        const auto & info = _objectInfo[objectId];
+        fheroes2::showStandardTextMessage( getObjectName( info ), "", Dialog::ZERO );
+    }
+
+    std::string getObjectName( const Maps::ObjectInfo & info )
+    {
+        if ( info.objectType == MP2::OBJ_NONE ) {
+            return _( "Terrain object" );
+        }
+
+        // Barriers and Traveller's Tents use the same name while we need to show their color as well.
+        if ( info.objectType == MP2::OBJ_BARRIER ) {
+            std::string str = _( "%{color} Barrier" );
+            StringReplace( str, "%{color}", fheroes2::getBarrierColorName( static_cast<int32_t>( info.metadata[0] ) ) );
+            return str;
+        }
+
+        if ( info.objectType == MP2::OBJ_TRAVELLER_TENT ) {
+            std::string str = _( "%{color} Tent" );
+            StringReplace( str, "%{color}", fheroes2::getTentColorName( static_cast<int32_t>( info.metadata[0] ) ) );
+            return str;
+        }
+
+        return MP2::StringObject( info.objectType );
+    }
+
+    const std::vector<Maps::ObjectInfo> & _objectInfo;
+
+    static constexpr int32_t _offsetY{ 3 * 32 };
+};
+
+int selectObjectType( const int objectType, const size_t objectCount, GenericObjectTypeGridSelection & objectSelection )
+{
+    static constexpr int itemWidth = 32 * 6;
+    objectSelection.setObjects( objectCount, itemWidth );
+
+    objectSelection.setSelection( std::max( objectType, 0 ) );
+
+    const int32_t result = objectSelection.selectItemsEventProcessing();
+    return result == Dialog::OK ? objectSelection.getSelectedObject() : -1;
 }
 
 Skill::Secondary Dialog::selectSecondarySkill( const Heroes & hero, const int skillId /* = Skill::Secondary::UNKNOWN */ )
@@ -1401,7 +1591,7 @@ int Dialog::selectDwellingType( const int dwellingType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::ADVENTURE_DWELLINGS );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 480, fheroes2::Display::instance().height() - 180 }, _( "Select Dwelling:" ) );
+    GenericObjectTypeGridSelection listbox( objectInfo, _( "Select Dwelling:" ) );
 
     return selectObjectType( dwellingType, objectInfo.size(), listbox );
 }
@@ -1410,7 +1600,7 @@ int Dialog::selectLandscapeMiscellaneousObjectType( const int objectType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::LANDSCAPE_MISCELLANEOUS );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 420, fheroes2::Display::instance().height() - 180 }, _( "Select Landscape Object:" ) );
+    GenericObjectTypeGridSelection listbox( objectInfo, _( "Select Landscape Object:" ) );
 
     return selectObjectType( objectType, objectInfo.size(), listbox );
 }
@@ -1707,16 +1897,16 @@ int Dialog::selectMountainType( const int mountainType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::LANDSCAPE_MOUNTAINS );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 420, fheroes2::Display::instance().height() - 180 }, _( "Select Mountain Object:" ) );
+    GenericObjectTypeGridSelection gridBox( objectInfo, _( "Select Mountain Object:" ) );
 
-    return selectObjectType( mountainType, objectInfo.size(), listbox );
+    return selectObjectType( mountainType, objectInfo.size(), gridBox );
 }
 
 int Dialog::selectRockType( const int rockType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::LANDSCAPE_ROCKS );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 420, fheroes2::Display::instance().height() - 180 }, _( "Select Rock Object:" ) );
+    GenericObjectTypeGridSelection listbox( objectInfo, _( "Select Rock Object:" ) );
 
     return selectObjectType( rockType, objectInfo.size(), listbox );
 }
@@ -1725,7 +1915,7 @@ int Dialog::selectTreeType( const int treeType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::LANDSCAPE_TREES );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 420, fheroes2::Display::instance().height() - 180 }, _( "Select Tree Object:" ) );
+    GenericObjectTypeGridSelection listbox( objectInfo, _( "Select Tree Object:" ) );
 
     return selectObjectType( treeType, objectInfo.size(), listbox );
 }
@@ -1743,7 +1933,7 @@ int Dialog::selectAdventureMiscellaneousObjectType( const int objectType )
 {
     const auto & objectInfo = Maps::getObjectsByGroup( Maps::ObjectGroup::ADVENTURE_MISCELLANEOUS );
 
-    GenericObjectTypeSelection listbox( objectInfo, { 420, fheroes2::Display::instance().height() - 180 }, _( "Select Adventure Object:" ) );
+    GenericObjectTypeGridSelection listbox( objectInfo, _( "Select Adventure Object:" ) );
 
     return selectObjectType( objectType, objectInfo.size(), listbox );
 }
